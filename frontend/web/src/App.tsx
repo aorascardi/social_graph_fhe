@@ -7,16 +7,21 @@ import { useAccount } from 'wagmi';
 import { useFhevm, useEncrypt, useDecrypt } from '../fhevm-sdk/src';
 
 interface SocialConnection {
-  id: number;
+  id: string;
   name: string;
-  encryptedFriends: string;
-  publicConnections: number;
-  timestamp: number;
-  creator: string;
+  encryptedValue: number;
   publicValue1: number;
   publicValue2: number;
+  description: string;
+  timestamp: number;
+  creator: string;
   isVerified?: boolean;
   decryptedValue?: number;
+}
+
+interface SocialGraph {
+  nodes: Array<{id: string, name: string, value: number}>;
+  links: Array<{source: string, target: string, strength: number}>;
 }
 
 const App: React.FC = () => {
@@ -24,33 +29,34 @@ const App: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [connections, setConnections] = useState<SocialConnection[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const [creatingConnection, setCreatingConnection] = useState(false);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [addingConnection, setAddingConnection] = useState(false);
   const [transactionStatus, setTransactionStatus] = useState<{ visible: boolean; status: "pending" | "success" | "error"; message: string; }>({ 
     visible: false, 
-    status: "pending", 
+    status: "pending" as const, 
     message: "" 
   });
-  const [newConnectionData, setNewConnectionData] = useState({ name: "", friends: "", connections: "" });
+  const [newConnectionData, setNewConnectionData] = useState({ name: "", closeness: "", description: "" });
   const [selectedConnection, setSelectedConnection] = useState<SocialConnection | null>(null);
-  const [decryptedData, setDecryptedData] = useState<number | null>(null);
-  const [isDecrypting, setIsDecrypting] = useState(false);
   const [contractAddress, setContractAddress] = useState("");
   const [fhevmInitializing, setFhevmInitializing] = useState(false);
+  const [activeTab, setActiveTab] = useState("graph");
   const [searchTerm, setSearchTerm] = useState("");
-  const [showStats, setShowStats] = useState(false);
+  const [operationHistory, setOperationHistory] = useState<Array<{type: string, timestamp: number, data: string}>>([]);
 
   const { status, initialize, isInitialized } = useFhevm();
-  const { encrypt, isEncrypting } = useEncrypt();
+  const { encrypt, isEncrypting} = useEncrypt();
   const { verifyDecryption, isDecrypting: fheIsDecrypting } = useDecrypt();
 
   useEffect(() => {
     const initFhevmAfterConnection = async () => {
-      if (!isConnected || isInitialized || fhevmInitializing) return;
+      if (!isConnected) return;
+      if (isInitialized || fhevmInitializing) return;
       
       try {
         setFhevmInitializing(true);
         await initialize();
+        addToHistory("FHEVM Initialized", "System ready for encrypted operations");
       } catch (error) {
         setTransactionStatus({ 
           visible: true, 
@@ -74,7 +80,7 @@ const App: React.FC = () => {
       }
       
       try {
-        await loadData();
+        await loadConnections();
         const contract = await getContractReadOnly();
         if (contract) setContractAddress(await contract.getAddress());
       } catch (error) {
@@ -87,7 +93,15 @@ const App: React.FC = () => {
     loadDataAndContract();
   }, [isConnected]);
 
-  const loadData = async () => {
+  const addToHistory = (type: string, data: string) => {
+    setOperationHistory(prev => [{
+      type,
+      timestamp: Date.now(),
+      data
+    }, ...prev.slice(0, 9)]);
+  };
+
+  const loadConnections = async () => {
     if (!isConnected) return;
     
     setIsRefreshing(true);
@@ -102,23 +116,24 @@ const App: React.FC = () => {
         try {
           const businessData = await contract.getBusinessData(businessId);
           connectionsList.push({
-            id: parseInt(businessId.replace('connection-', '')) || Date.now(),
+            id: businessId,
             name: businessData.name,
-            encryptedFriends: businessId,
-            publicConnections: Number(businessData.publicValue1) || 0,
-            timestamp: Number(businessData.timestamp),
-            creator: businessData.creator,
+            encryptedValue: 0,
             publicValue1: Number(businessData.publicValue1) || 0,
             publicValue2: Number(businessData.publicValue2) || 0,
+            description: businessData.description,
+            timestamp: Number(businessData.timestamp),
+            creator: businessData.creator,
             isVerified: businessData.isVerified,
             decryptedValue: Number(businessData.decryptedValue) || 0
           });
         } catch (e) {
-          console.error('Error loading business data:', e);
+          console.error('Error loading connection data:', e);
         }
       }
       
       setConnections(connectionsList);
+      addToHistory("Data Loaded", `Loaded ${connectionsList.length} connections`);
     } catch (e) {
       setTransactionStatus({ visible: true, status: "error", message: "Failed to load data" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
@@ -127,46 +142,47 @@ const App: React.FC = () => {
     }
   };
 
-  const createConnection = async () => {
+  const addConnection = async () => {
     if (!isConnected || !address) { 
       setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return; 
     }
     
-    setCreatingConnection(true);
-    setTransactionStatus({ visible: true, status: "pending", message: "Creating social connection with FHE..." });
+    setAddingConnection(true);
+    setTransactionStatus({ visible: true, status: "pending", message: "Adding connection with FHE encryption..." });
     
     try {
       const contract = await getContractWithSigner();
       if (!contract) throw new Error("Failed to get contract with signer");
       
-      const friendsValue = parseInt(newConnectionData.friends) || 0;
+      const closenessValue = parseInt(newConnectionData.closeness) || 0;
       const businessId = `connection-${Date.now()}`;
       
-      const encryptedResult = await encrypt(contractAddress, address, friendsValue);
+      const encryptedResult = await encrypt(contractAddress, address, closenessValue);
       
       const tx = await contract.createBusinessData(
         businessId,
         newConnectionData.name,
         encryptedResult.encryptedData,
         encryptedResult.proof,
-        parseInt(newConnectionData.connections) || 0,
+        closenessValue,
         0,
-        "Social Connection"
+        newConnectionData.description
       );
       
       setTransactionStatus({ visible: true, status: "pending", message: "Waiting for transaction confirmation..." });
       await tx.wait();
       
-      setTransactionStatus({ visible: true, status: "success", message: "Connection created successfully!" });
+      setTransactionStatus({ visible: true, status: "success", message: "Connection added successfully!" });
+      addToHistory("Connection Added", `Added: ${newConnectionData.name}`);
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
       }, 2000);
       
-      await loadData();
-      setShowCreateModal(false);
-      setNewConnectionData({ name: "", friends: "", connections: "" });
+      await loadConnections();
+      setShowAddModal(false);
+      setNewConnectionData({ name: "", closeness: "", description: "" });
     } catch (e: any) {
       const errorMessage = e.message?.includes("user rejected transaction") 
         ? "Transaction rejected by user" 
@@ -174,60 +190,52 @@ const App: React.FC = () => {
       setTransactionStatus({ visible: true, status: "error", message: errorMessage });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     } finally { 
-      setCreatingConnection(false); 
+      setAddingConnection(false); 
     }
   };
 
-  const decryptData = async (businessId: string): Promise<number | null> => {
+  const decryptConnection = async (connection: SocialConnection): Promise<number | null> => {
     if (!isConnected || !address) { 
       setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return null; 
     }
     
-    setIsDecrypting(true);
     try {
       const contractRead = await getContractReadOnly();
       if (!contractRead) return null;
       
-      const businessData = await contractRead.getBusinessData(businessId);
+      const businessData = await contractRead.getBusinessData(connection.id);
       if (businessData.isVerified) {
         const storedValue = Number(businessData.decryptedValue) || 0;
-        
         setTransactionStatus({ 
           visible: true, 
           status: "success", 
           message: "Data already verified on-chain" 
         });
-        setTimeout(() => {
-          setTransactionStatus({ visible: false, status: "pending", message: "" });
-        }, 2000);
-        
+        setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
         return storedValue;
       }
       
       const contractWrite = await getContractWithSigner();
       if (!contractWrite) return null;
       
-      const encryptedValueHandle = await contractRead.getEncryptedValue(businessId);
+      const encryptedValueHandle = await contractRead.getEncryptedValue(connection.id);
       
       const result = await verifyDecryption(
         [encryptedValueHandle],
         contractAddress,
         (abiEncodedClearValues: string, decryptionProof: string) => 
-          contractWrite.verifyDecryption(businessId, abiEncodedClearValues, decryptionProof)
+          contractWrite.verifyDecryption(connection.id, abiEncodedClearValues, decryptionProof)
       );
       
       setTransactionStatus({ visible: true, status: "pending", message: "Verifying decryption on-chain..." });
-      
       const clearValue = result.decryptionResult.clearValues[encryptedValueHandle];
       
-      await loadData();
-      
-      setTransactionStatus({ visible: true, status: "success", message: "Data decrypted and verified successfully!" });
-      setTimeout(() => {
-        setTransactionStatus({ visible: false, status: "pending", message: "" });
-      }, 2000);
+      await loadConnections();
+      setTransactionStatus({ visible: true, status: "success", message: "Connection closeness decrypted!" });
+      addToHistory("Data Decrypted", `Decrypted: ${connection.name}`);
+      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
       
       return Number(clearValue);
       
@@ -238,11 +246,8 @@ const App: React.FC = () => {
           status: "success", 
           message: "Data is already verified on-chain" 
         });
-        setTimeout(() => {
-          setTransactionStatus({ visible: false, status: "pending", message: "" });
-        }, 2000);
-        
-        await loadData();
+        setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
+        await loadConnections();
         return null;
       }
       
@@ -253,42 +258,55 @@ const App: React.FC = () => {
       });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return null; 
-    } finally { 
-      setIsDecrypting(false); 
     }
   };
 
-  const filteredConnections = connections.filter(conn => 
-    conn.name.toLowerCase().includes(searchTerm.toLowerCase())
-  );
-
-  const stats = {
-    totalConnections: connections.length,
-    verifiedConnections: connections.filter(c => c.isVerified).length,
-    avgFriends: connections.length > 0 
-      ? connections.reduce((sum, c) => sum + (c.decryptedValue || c.publicValue1), 0) / connections.length 
-      : 0,
-    recentConnections: connections.filter(c => 
-      Date.now()/1000 - c.timestamp < 60 * 60 * 24 * 7
-    ).length
-  };
-
-  const callIsAvailable = async () => {
+  const checkAvailability = async () => {
     try {
       const contract = await getContractReadOnly();
       if (!contract) return;
       
-      const result = await contract.isAvailable();
+      const available = await contract.isAvailable();
       setTransactionStatus({ 
         visible: true, 
         status: "success", 
-        message: "Contract is available and working!" 
+        message: `Contract is ${available ? "available" : "unavailable"}` 
       });
+      addToHistory("Availability Check", "Contract status verified");
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
     } catch (e) {
-      setTransactionStatus({ visible: true, status: "error", message: "Contract call failed" });
+      setTransactionStatus({ visible: true, status: "error", message: "Availability check failed" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     }
+  };
+
+  const generateGraphData = (): SocialGraph => {
+    const nodes = connections.map(conn => ({
+      id: conn.id,
+      name: conn.name,
+      value: conn.publicValue1
+    }));
+    
+    const links = connections.slice(0, Math.min(connections.length, 5)).map((conn, index) => ({
+      source: "you",
+      target: conn.id,
+      strength: conn.publicValue1 / 10
+    }));
+    
+    return { nodes: [{id: "you", name: "You", value: 10}, ...nodes], links };
+  };
+
+  const filteredConnections = connections.filter(conn => 
+    conn.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    conn.description.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+  const stats = {
+    total: connections.length,
+    verified: connections.filter(c => c.isVerified).length,
+    avgCloseness: connections.length > 0 ? 
+      connections.reduce((sum, c) => sum + c.publicValue1, 0) / connections.length : 0,
+    recent: connections.filter(c => Date.now()/1000 - c.timestamp < 604800).length
   };
 
   if (!isConnected) {
@@ -299,15 +317,31 @@ const App: React.FC = () => {
             <h1>Private Social Graph 🔐</h1>
           </div>
           <div className="header-actions">
-            <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+            <div className="wallet-connect-wrapper">
+              <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+            </div>
           </div>
         </header>
         
         <div className="connection-prompt">
           <div className="connection-content">
-            <div className="connection-icon">🔐</div>
-            <h2>Connect Your Wallet</h2>
-            <p>Connect your wallet to access the encrypted social graph system</p>
+            <div className="connection-icon">🔒</div>
+            <h2>Connect to Encrypted Social Network</h2>
+            <p>Your social connections are protected with FHE technology</p>
+            <div className="connection-steps">
+              <div className="step">
+                <span>1</span>
+                <p>Connect wallet to initialize FHE system</p>
+              </div>
+              <div className="step">
+                <span>2</span>
+                <p>Add encrypted social connections</p>
+              </div>
+              <div className="step">
+                <span>3</span>
+                <p>Discover mutual friends privately</p>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -318,7 +352,8 @@ const App: React.FC = () => {
     return (
       <div className="loading-screen">
         <div className="fhe-spinner"></div>
-        <p>Initializing FHE System...</p>
+        <p>Initializing FHE Encryption...</p>
+        <p className="loading-note">Securing your social data</p>
       </div>
     );
   }
@@ -334,166 +369,205 @@ const App: React.FC = () => {
     <div className="app-container">
       <header className="app-header">
         <div className="logo">
-          <h1>Private Social Graph 🔐</h1>
+          <h1>Social Graph FHE 🔐</h1>
+          <p>Privacy-Preserving Connections</p>
         </div>
         
         <div className="header-actions">
-          <button onClick={callIsAvailable} className="test-btn">
-            Test Contract
+          <button onClick={checkAvailability} className="availability-btn">
+            Check Availability
           </button>
-          <button onClick={() => setShowStats(!showStats)} className="stats-btn">
-            {showStats ? "Hide Stats" : "Show Stats"}
+          <button onClick={() => setShowAddModal(true)} className="add-btn">
+            + Add Connection
           </button>
-          <button onClick={() => setShowCreateModal(true)} className="create-btn">
-            + New Connection
-          </button>
-          <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+          <div className="wallet-connect-wrapper">
+            <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+          </div>
         </div>
       </header>
       
       <div className="main-content">
-        {showStats && (
-          <div className="stats-panel">
-            <div className="stat-item">
-              <span>Total Connections</span>
-              <strong>{stats.totalConnections}</strong>
-            </div>
-            <div className="stat-item">
-              <span>Verified Data</span>
-              <strong>{stats.verifiedConnections}</strong>
-            </div>
-            <div className="stat-item">
-              <span>Avg Friends</span>
-              <strong>{stats.avgFriends.toFixed(1)}</strong>
-            </div>
-            <div className="stat-item">
-              <span>This Week</span>
-              <strong>{stats.recentConnections}</strong>
-            </div>
+        <div className="stats-panel">
+          <div className="stat-card">
+            <div className="stat-value">{stats.total}</div>
+            <div className="stat-label">Total Connections</div>
           </div>
-        )}
+          <div className="stat-card">
+            <div className="stat-value">{stats.verified}</div>
+            <div className="stat-label">Verified</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-value">{stats.avgCloseness.toFixed(1)}</div>
+            <div className="stat-label">Avg Closeness</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-value">{stats.recent}</div>
+            <div className="stat-label">This Week</div>
+          </div>
+        </div>
         
-        <div className="search-section">
-          <input
-            type="text"
-            placeholder="Search connections..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="search-input"
-          />
-          <button onClick={loadData} className="refresh-btn" disabled={isRefreshing}>
-            {isRefreshing ? "Refreshing..." : "Refresh"}
+        <div className="content-tabs">
+          <button 
+            className={`tab ${activeTab === "graph" ? "active" : ""}`}
+            onClick={() => setActiveTab("graph")}
+          >
+            Social Graph
+          </button>
+          <button 
+            className={`tab ${activeTab === "list" ? "active" : ""}`}
+            onClick={() => setActiveTab("list")}
+          >
+            Connections List
+          </button>
+          <button 
+            className={`tab ${activeTab === "history" ? "active" : ""}`}
+            onClick={() => setActiveTab("history")}
+          >
+            Operation History
           </button>
         </div>
         
-        <div className="connections-grid">
-          {filteredConnections.length === 0 ? (
-            <div className="no-connections">
-              <p>No social connections found</p>
-              <button onClick={() => setShowCreateModal(true)} className="create-btn">
-                Create First Connection
-              </button>
-            </div>
-          ) : (
-            filteredConnections.map((connection, index) => (
-              <div 
-                className={`connection-card ${selectedConnection?.id === connection.id ? "selected" : ""} ${connection.isVerified ? "verified" : ""}`}
-                key={index}
-                onClick={() => setSelectedConnection(connection)}
-              >
-                <div className="card-header">
-                  <h3>{connection.name}</h3>
-                  <span className={`status ${connection.isVerified ? "verified" : "encrypted"}`}>
-                    {connection.isVerified ? "✅ Verified" : "🔒 Encrypted"}
-                  </span>
-                </div>
-                <div className="card-content">
-                  <div className="info-row">
-                    <span>Public Connections:</span>
-                    <strong>{connection.publicConnections}</strong>
+        <div className="tab-content">
+          {activeTab === "graph" && (
+            <div className="graph-view">
+              <h3>Your Social Network</h3>
+              <div className="graph-visualization">
+                {generateGraphData().nodes.map(node => (
+                  <div key={node.id} className="graph-node">
+                    <div className="node-avatar">{node.name.charAt(0)}</div>
+                    <div className="node-name">{node.name}</div>
+                    <div className="node-value">{node.value}/10</div>
                   </div>
-                  <div className="info-row">
-                    <span>Encrypted Friends:</span>
-                    <strong>
-                      {connection.isVerified ? 
-                        `${connection.decryptedValue} friends` : 
-                        "🔒 FHE Protected"
-                      }
-                    </strong>
-                  </div>
-                  <div className="info-row">
-                    <span>Created:</span>
-                    <span>{new Date(connection.timestamp * 1000).toLocaleDateString()}</span>
-                  </div>
-                </div>
-                <div className="card-footer">
-                  <span className="creator">
-                    {connection.creator.substring(0, 6)}...{connection.creator.substring(38)}
-                  </span>
-                </div>
+                ))}
               </div>
-            ))
+            </div>
           )}
+          
+          {activeTab === "list" && (
+            <div className="list-view">
+              <div className="list-header">
+                <div className="search-box">
+                  <input 
+                    type="text"
+                    placeholder="Search connections..."
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                  />
+                </div>
+                <button onClick={loadConnections} className="refresh-btn">
+                  {isRefreshing ? "Refreshing..." : "Refresh"}
+                </button>
+              </div>
+              
+              <div className="connections-list">
+                {filteredConnections.map(connection => (
+                  <div 
+                    key={connection.id} 
+                    className={`connection-item ${connection.isVerified ? "verified" : ""}`}
+                    onClick={() => setSelectedConnection(connection)}
+                  >
+                    <div className="connection-avatar">{connection.name.charAt(0)}</div>
+                    <div className="connection-info">
+                      <div className="connection-name">{connection.name}</div>
+                      <div className="connection-desc">{connection.description}</div>
+                      <div className="connection-meta">
+                        <span>Closeness: {connection.publicValue1}/10</span>
+                        <span>{new Date(connection.timestamp * 1000).toLocaleDateString()}</span>
+                      </div>
+                    </div>
+                    <div className="connection-status">
+                      {connection.isVerified ? "✅ Verified" : "🔒 Encrypted"}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          
+          {activeTab === "history" && (
+            <div className="history-view">
+              <h3>Recent Operations</h3>
+              <div className="history-list">
+                {operationHistory.map((op, index) => (
+                  <div key={index} className="history-item">
+                    <div className="history-type">{op.type}</div>
+                    <div className="history-data">{op.data}</div>
+                    <div className="history-time">
+                      {new Date(op.timestamp).toLocaleTimeString()}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        
+        <div className="partners-section">
+          <h3>Technology Partners</h3>
+          <div className="partners-grid">
+            <div className="partner-logo">Zama FHE</div>
+            <div className="partner-logo">Web3 Social</div>
+            <div className="partner-logo">Privacy Tech</div>
+          </div>
         </div>
       </div>
       
-      {showCreateModal && (
+      {showAddModal && (
         <div className="modal-overlay">
-          <div className="create-modal">
+          <div className="add-connection-modal">
             <div className="modal-header">
-              <h2>New Social Connection</h2>
-              <button onClick={() => setShowCreateModal(false)} className="close-btn">&times;</button>
+              <h2>Add Social Connection</h2>
+              <button onClick={() => setShowAddModal(false)} className="close-modal">&times;</button>
             </div>
             
             <div className="modal-body">
               <div className="fhe-notice">
-                <strong>FHE 🔐 Protection</strong>
-                <p>Friend count will be encrypted with Zama FHE (Integer only)</p>
+                <strong>FHE Encryption Active</strong>
+                <p>Closeness score will be encrypted with Zama FHE</p>
               </div>
               
               <div className="form-group">
-                <label>Profile Name *</label>
+                <label>Connection Name *</label>
                 <input 
                   type="text" 
                   value={newConnectionData.name} 
                   onChange={(e) => setNewConnectionData({...newConnectionData, name: e.target.value})} 
-                  placeholder="Enter profile name..." 
+                  placeholder="Enter name..." 
                 />
               </div>
               
               <div className="form-group">
-                <label>Number of Friends (FHE Encrypted) *</label>
+                <label>Closeness Score (1-10) *</label>
                 <input 
                   type="number" 
-                  value={newConnectionData.friends} 
-                  onChange={(e) => setNewConnectionData({...newConnectionData, friends: e.target.value})} 
-                  placeholder="Enter friend count..." 
-                  min="0"
+                  min="1" 
+                  max="10" 
+                  value={newConnectionData.closeness} 
+                  onChange={(e) => setNewConnectionData({...newConnectionData, closeness: e.target.value})} 
+                  placeholder="1-10" 
                 />
-                <div className="data-label">FHE Encrypted Integer</div>
+                <div className="data-type-label">FHE Encrypted Integer</div>
               </div>
               
               <div className="form-group">
-                <label>Public Connections *</label>
+                <label>Description</label>
                 <input 
-                  type="number" 
-                  value={newConnectionData.connections} 
-                  onChange={(e) => setNewConnectionData({...newConnectionData, connections: e.target.value})} 
-                  placeholder="Enter public connections..." 
-                  min="0"
+                  type="text" 
+                  value={newConnectionData.description} 
+                  onChange={(e) => setNewConnectionData({...newConnectionData, description: e.target.value})} 
+                  placeholder="Relationship description..." 
                 />
-                <div className="data-label">Public Data</div>
               </div>
             </div>
             
             <div className="modal-footer">
-              <button onClick={() => setShowCreateModal(false)} className="cancel-btn">Cancel</button>
+              <button onClick={() => setShowAddModal(false)} className="cancel-btn">Cancel</button>
               <button 
-                onClick={createConnection} 
-                disabled={creatingConnection || isEncrypting || !newConnectionData.name || !newConnectionData.friends || !newConnectionData.connections} 
+                onClick={addConnection} 
+                disabled={addingConnection || isEncrypting || !newConnectionData.name || !newConnectionData.closeness} 
                 className="submit-btn"
               >
-                {creatingConnection || isEncrypting ? "Encrypting..." : "Create Connection"}
+                {addingConnection || isEncrypting ? "Encrypting..." : "Add Connection"}
               </button>
             </div>
           </div>
@@ -502,126 +576,64 @@ const App: React.FC = () => {
       
       {selectedConnection && (
         <div className="modal-overlay">
-          <div className="detail-modal">
+          <div className="connection-detail-modal">
             <div className="modal-header">
               <h2>Connection Details</h2>
-              <button onClick={() => {
-                setSelectedConnection(null);
-                setDecryptedData(null);
-              }} className="close-btn">&times;</button>
+              <button onClick={() => setSelectedConnection(null)} className="close-modal">&times;</button>
             </div>
             
             <div className="modal-body">
-              <div className="detail-section">
-                <h3>Profile Information</h3>
-                <div className="info-grid">
-                  <div className="info-item">
-                    <span>Name:</span>
-                    <strong>{selectedConnection.name}</strong>
-                  </div>
-                  <div className="info-item">
-                    <span>Creator:</span>
-                    <span>{selectedConnection.creator}</span>
-                  </div>
-                  <div className="info-item">
-                    <span>Created:</span>
-                    <span>{new Date(selectedConnection.timestamp * 1000).toLocaleString()}</span>
-                  </div>
-                  <div className="info-item">
-                    <span>Public Connections:</span>
-                    <strong>{selectedConnection.publicConnections}</strong>
-                  </div>
+              <div className="connection-header">
+                <div className="detail-avatar">{selectedConnection.name.charAt(0)}</div>
+                <div className="detail-info">
+                  <h3>{selectedConnection.name}</h3>
+                  <p>{selectedConnection.description}</p>
                 </div>
               </div>
               
-              <div className="detail-section">
-                <h3>Encrypted Data</h3>
-                <div className="encrypted-data">
-                  <div className="data-row">
-                    <span>Friend Count:</span>
-                    <strong>
-                      {selectedConnection.isVerified ? 
-                        `${selectedConnection.decryptedValue} friends` : 
-                        decryptedData !== null ? 
-                        `${decryptedData} friends (Decrypted)` : 
-                        "🔒 FHE Encrypted"
-                      }
-                    </strong>
-                    <button 
-                      onClick={async () => {
-                        if (decryptedData !== null) {
-                          setDecryptedData(null);
-                        } else {
-                          const result = await decryptData(selectedConnection.encryptedFriends);
-                          if (result !== null) setDecryptedData(result);
-                        }
-                      }}
-                      disabled={isDecrypting || fheIsDecrypting}
-                      className={`decrypt-btn ${(selectedConnection.isVerified || decryptedData !== null) ? 'decrypted' : ''}`}
-                    >
-                      {isDecrypting || fheIsDecrypting ? "Decrypting..." : 
-                       selectedConnection.isVerified ? "✅ Verified" : 
-                       decryptedData !== null ? "🔄 Re-decrypt" : "🔓 Decrypt"}
-                    </button>
+              <div className="connection-stats">
+                <div className="stat">
+                  <label>Public Closeness</label>
+                  <div className="value">{selectedConnection.publicValue1}/10</div>
+                </div>
+                <div className="stat">
+                  <label>Encrypted Value</label>
+                  <div className="value">
+                    {selectedConnection.isVerified ? 
+                      `${selectedConnection.decryptedValue} (Verified)` : 
+                      "🔒 Encrypted"
+                    }
                   </div>
-                  
-                  <div className="fhe-explanation">
-                    <div className="fhe-icon">🔐</div>
-                    <div>
-                      <strong>FHE Protected Data</strong>
-                      <p>Friend count is encrypted on-chain using Zama FHE. Click decrypt to verify the data.</p>
-                    </div>
-                  </div>
+                </div>
+                <div className="stat">
+                  <label>Added</label>
+                  <div className="value">{new Date(selectedConnection.timestamp * 1000).toLocaleDateString()}</div>
                 </div>
               </div>
               
-              {(selectedConnection.isVerified || decryptedData !== null) && (
-                <div className="detail-section">
-                  <h3>Social Analysis</h3>
-                  <div className="analysis">
-                    <div className="metric">
-                      <span>Social Score</span>
-                      <div className="score-bar">
-                        <div 
-                          className="score-fill" 
-                          style={{ width: `${Math.min(100, (selectedConnection.isVerified ? selectedConnection.decryptedValue! : decryptedData!) * 2)}%` }}
-                        ></div>
-                      </div>
-                    </div>
-                    <div className="metrics-grid">
-                      <div className="metric-item">
-                        <span>Network Density</span>
-                        <strong>{Math.round((selectedConnection.isVerified ? selectedConnection.decryptedValue! : decryptedData!) * 0.7)}%</strong>
-                      </div>
-                      <div className="metric-item">
-                        <span>Influence Score</span>
-                        <strong>{Math.round((selectedConnection.isVerified ? selectedConnection.decryptedValue! : decryptedData!) * 1.5)}</strong>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-            
-            <div className="modal-footer">
-              <button onClick={() => {
-                setSelectedConnection(null);
-                setDecryptedData(null);
-              }} className="close-btn">Close</button>
+              <button 
+                onClick={() => decryptConnection(selectedConnection)}
+                disabled={fheIsDecrypting || selectedConnection.isVerified}
+                className="decrypt-btn"
+              >
+                {fheIsDecrypting ? "Decrypting..." : 
+                 selectedConnection.isVerified ? "✅ Already Verified" : 
+                 "🔓 Verify Closeness"}
+              </button>
             </div>
           </div>
         </div>
       )}
       
       {transactionStatus.visible && (
-        <div className="notification">
-          <div className={`notification-content ${transactionStatus.status}`}>
-            <div className="notification-icon">
-              {transactionStatus.status === "pending" && <div className="spinner"></div>}
+        <div className="transaction-modal">
+          <div className="transaction-content">
+            <div className={`transaction-icon ${transactionStatus.status}`}>
+              {transactionStatus.status === "pending" && <div className="fhe-spinner"></div>}
               {transactionStatus.status === "success" && "✓"}
               {transactionStatus.status === "error" && "✗"}
             </div>
-            <span>{transactionStatus.message}</span>
+            <div className="transaction-message">{transactionStatus.message}</div>
           </div>
         </div>
       )}
